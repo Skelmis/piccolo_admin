@@ -761,7 +761,8 @@ class AdminRouter(FastAPI):
             on_error=handle_auth_exception,
         )
 
-        self.mount(path="/api", app=auth_middleware(private_app))
+        # self.mount(path="/api", app=auth_middleware(private_app))
+        self.mount(path="/api", app=private_app)
         self.mount(path="/public", app=public_app)
 
     async def get_root(self, request: Request) -> HTMLResponse:
@@ -871,9 +872,13 @@ class AdminRouter(FastAPI):
     ###########################################################################
 
     def get_user(self, request: Request) -> UserResponseModel:
+        # return UserResponseModel(
+        #     username=request.user.display_name,
+        #     user_id=str(request.user.user_id),
+        # )
         return UserResponseModel(
-            username=request.user.display_name,
-            user_id=str(request.user.user_id),
+            username="Open Admin",
+            user_id="1",
         )
 
     ###########################################################################
