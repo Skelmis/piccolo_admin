@@ -1,6 +1,54 @@
 Changes
 =======
 
+1.9.0
+-----
+
+Forms can now be grouped in the sidebar. This is useful when you have lots of
+forms and want to keep things organised. Thanks to @sinisaos for this.
+
+-------------------------------------------------------------------------------
+
+1.8.2
+-----
+
+Added a missing JPEG file for an example form.
+
+-------------------------------------------------------------------------------
+
+1.8.1
+-----
+
+Added more example forms.
+
+-------------------------------------------------------------------------------
+
+1.8.0
+-----
+
+Piccolo Admin forms can now be used to download files, e.g. CSV and PDF files,
+which are really useful for reporting purposes. Many thanks to @sinisaos for
+the help on this.
+
+-------------------------------------------------------------------------------
+
+1.7.1
+-----
+
+Make the `MFA Setup` URL relative, so it works when Piccolo Admin isn't mounted
+at the root.
+
+-------------------------------------------------------------------------------
+
+1.7.0
+-----
+
+Initial release for Multi-factor Authentication support.
+
+Many thanks to @sinisaos and @Skelmis for their help with this.
+
+-------------------------------------------------------------------------------
+
 1.6.0
 -----
 

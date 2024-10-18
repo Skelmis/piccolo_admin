@@ -1,4 +1,6 @@
+import csv
 import datetime
+import io
 import os
 import uuid
 from pathlib import Path
@@ -14,9 +16,11 @@ from piccolo.columns.column_types import (
     Varchar,
 )
 from piccolo.table import Table, create_db_tables_sync, drop_db_tables_sync
+from piccolo.testing.test_case import TableTest
 from piccolo_api.crud.hooks import Hook, HookType
 from piccolo_api.crud.validators import Validators
 from piccolo_api.media.local import LocalMediaStorage
+from piccolo_api.mfa.authenticator.tables import AuthenticatorSecret
 from piccolo_api.session_auth.tables import SessionsBase
 from starlette.exceptions import HTTPException
 from starlette.testclient import TestClient
@@ -27,7 +31,7 @@ from piccolo_admin.endpoints import (
     create_admin,
     get_all_tables,
 )
-from piccolo_admin.example import APP, MEDIA_ROOT, Director, Movie
+from piccolo_admin.example.app import APP, MEDIA_ROOT, Director, Movie
 from piccolo_admin.translations.data import ENGLISH, FRENCH, TRANSLATIONS
 from piccolo_admin.version import __VERSION__
 
@@ -241,18 +245,16 @@ class TestAdminRouter(TestCase):
         self.assertEqual(response.status_code, 401)
 
 
-class TestForms(TestCase):
+class TestForms(TableTest):
     credentials = {"username": "Bob", "password": "bob123"}
 
+    tables = [BaseUser, SessionsBase, AuthenticatorSecret, Movie, Director]
+
     def setUp(self):
-        create_db_tables_sync(SessionsBase, BaseUser, if_not_exists=True)
+        super().setUp()
         BaseUser.create_user_sync(
             **self.credentials, active=True, admin=True, superuser=True
         )
-
-    def tearDown(self):
-        SessionsBase.alter().drop_table().run_sync()
-        BaseUser.alter().drop_table().run_sync()
 
     def test_forms(self):
         """
@@ -281,14 +283,27 @@ class TestForms(TestCase):
             response.json(),
             [
                 {
-                    "name": "Business email form",
-                    "slug": "business-email-form",
-                    "description": "Send an email to a business associate.",
+                    "name": "Calculator",
+                    "slug": "calculator",
+                    "description": "Adds two numbers together.",
+                },
+                {
+                    "name": "Download director movies",
+                    "slug": "download-director-movies",
+                    "description": (
+                        "Download a list of movies for the director as a CSV "
+                        "file."
+                    ),
                 },
                 {
                     "name": "Booking form",
                     "slug": "booking-form",
                     "description": "Make a booking for a customer.",
+                },
+                {
+                    "name": "Download schedule",
+                    "slug": "download-schedule",
+                    "description": "Download the schedule for the day.",
                 },
             ],
         )
@@ -296,23 +311,38 @@ class TestForms(TestCase):
         #######################################################################
         # Now get the schema for a form
 
-        response = client.get("/api/forms/business-email-form/schema/")
+        response = client.get("/api/forms/booking-form/schema/")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(
             response.json(),
             {
-                "title": "BusinessEmailModel",
-                "type": "object",
                 "properties": {
-                    "email": {"title": "Email", "type": "string"},
-                    "title": {
-                        "default": "Enquiry",
-                        "title": "Title",
+                    "email": {
+                        "format": "email",
+                        "title": "Email",
                         "type": "string",
                     },
-                    "content": {"title": "Content", "type": "string"},
+                    "movie": {
+                        "default": "Star Wars: Episode IV - A New Hope",
+                        "title": "Movie",
+                        "type": "string",
+                    },
+                    "name": {"title": "Name", "type": "string"},
+                    "notes": {
+                        "default": "N/A",
+                        "title": "Notes",
+                        "type": "string",
+                    },
+                    "starts_at": {
+                        "format": "date-time",
+                        "title": "Starts At",
+                        "type": "string",
+                    },
+                    "tickets": {"title": "Tickets", "type": "integer"},
                 },
-                "required": ["email", "content"],
+                "required": ["email", "name", "tickets", "starts_at"],
+                "title": "BookingModel",
+                "type": "object",
             },
         )
         response = client.get("/api/forms/email-form/schema/")
@@ -322,14 +352,15 @@ class TestForms(TestCase):
         #######################################################################
         # Now get the FormConfig for a single form
 
-        response = client.get("/api/forms/business-email-form/")
+        response = client.get("/api/forms/booking-form/")
         self.assertEqual(response.status_code, 200)
+
         self.assertEqual(
             response.json(),
             {
-                "name": "Business email form",
-                "slug": "business-email-form",
-                "description": "Send an email to a business associate.",
+                "name": "Booking form",
+                "slug": "booking-form",
+                "description": "Make a booking for a customer.",
             },
         )
         response = client.get("/api/forms/no-such-form/")
@@ -354,29 +385,10 @@ class TestForms(TestCase):
         # Post a form
 
         form_payload = {
-            "email": "director@director.com",
-            "title": "Hello director",
-            "content": "Hello from Piccolo Admin",
-        }
-
-        response = client.post(
-            "/api/forms/business-email-form/",
-            json=form_payload,
-            headers={"X-CSRFToken": csrftoken},
-        )
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(
-            response.json(), {"custom_form_success": "Email sent"}
-        )
-
-        #######################################################################
-        # Make sure async endpoints also work.
-
-        form_payload = {
-            "email": "customer@test.com",
-            "name": "Bob Jones",
-            "notes": "1 ticket",
+            "email": "customer@example.com",
+            "name": "Alice Jones",
+            "tickets": 2,
+            "starts_at": datetime.datetime.now().isoformat(),
         }
 
         response = client.post(
@@ -389,6 +401,51 @@ class TestForms(TestCase):
         self.assertEqual(
             response.json(), {"custom_form_success": "Booking complete"}
         )
+
+    def test_image_response(self):
+        client = TestClient(APP)
+
+        # To get a CSRF cookie
+        response = client.get("/")
+        csrftoken = response.cookies["csrftoken"]
+
+        # Login
+        payload = dict(csrftoken=csrftoken, **self.credentials)
+        client.post(
+            "/public/login/",
+            json=payload,
+            headers={"X-CSRFToken": csrftoken},
+        )
+        #######################################################################
+        # Post a form
+
+        form_payload = {
+            "director_name": "George Lucas",
+        }
+
+        response = client.post(
+            "/api/forms/download-director-movies/",
+            json=form_payload,
+            headers={"X-CSRFToken": csrftoken},
+        )
+
+        self.assertEqual(response.status_code, 200)
+
+        headers = response.headers
+
+        self.assertEqual(
+            headers["content-disposition"],
+            'attachment; filename="director_movies.csv"',
+        )
+
+        self.assertEqual(
+            headers["content-type"],
+            "text/csv; charset=utf-8",
+        )
+
+        reader = csv.reader(io.StringIO(response.content.decode()))
+        rows = [i for i in reader]
+        self.assertListEqual(rows[0], ["name", "release_date"])
 
     def test_post_form_fail(self):
         client = TestClient(APP)
@@ -408,18 +465,85 @@ class TestForms(TestCase):
         # Post a form with errors
 
         form_payload = {
-            "email": "director",
-            "title": "Hello director",
-            "content": "Hello from Piccolo Admin",
+            "email": "customer",  # This is incorrect
+            "name": "Alice Jones",
+            "tickets": 2,
+            "starts_at": datetime.datetime.now().isoformat(),
         }
 
         response = client.post(
-            "/api/forms/business-email-form/",
+            "/api/forms/booking-form/",
             json=form_payload,
             headers={"X-CSRFToken": csrftoken},
         )
 
         self.assertEqual(response.status_code, 422)
+
+    def test_forms_grouped(self):
+        """
+        Make sure the grouped forms listing can be retrieved.
+        """
+        client = TestClient(APP)
+        # To get a CSRF cookie
+        response = client.get("/")
+        csrftoken = response.cookies["csrftoken"]
+        # Login
+        payload = dict(csrftoken=csrftoken, **self.credentials)
+        client.post(
+            "/public/login/",
+            json=payload,
+            headers={"X-CSRFToken": csrftoken},
+        )
+
+        response = client.get("/api/forms/grouped/")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json(),
+            {
+                "grouped": {
+                    "Download forms": [
+                        {
+                            "description": "Download a list of movies for "
+                            "the director as a CSV file.",
+                            "name": "Download director movies",
+                            "slug": "download-director-movies",
+                        },
+                        {
+                            "description": "Download the schedule for the "
+                            "day.",
+                            "name": "Download schedule",
+                            "slug": "download-schedule",
+                        },
+                    ],
+                    "Text forms": [
+                        {
+                            "description": "Make a booking for a customer.",
+                            "name": "Booking form",
+                            "slug": "booking-form",
+                        }
+                    ],
+                },
+                "ungrouped": [
+                    {
+                        "description": "Adds two numbers together.",
+                        "name": "Calculator",
+                        "slug": "calculator",
+                    }
+                ],
+            },
+        )
+
+
+class TestSidebarLinks(TableTest):
+    credentials = {"username": "Bob", "password": "bob123"}
+
+    tables = [BaseUser, SessionsBase, AuthenticatorSecret]
+
+    def setUp(self):
+        super().setUp()
+        BaseUser.create_user_sync(
+            **self.credentials, active=True, admin=True, superuser=True
+        )
 
     def test_sidebar_links(self):
         client = TestClient(APP)
@@ -449,17 +573,16 @@ class TestForms(TestCase):
         )
 
 
-class TestMediaStorage(TestCase):
+class TestMediaStorage(TableTest):
     credentials = {"username": "Bob", "password": "bob123"}
 
+    tables = [BaseUser, SessionsBase, AuthenticatorSecret]
+
     def setUp(self):
-        create_db_tables_sync(SessionsBase, BaseUser, if_not_exists=True)
+        super().setUp()
         BaseUser.create_user_sync(
             **self.credentials, active=True, admin=True, superuser=True
         )
-
-    def tearDown(self):
-        drop_db_tables_sync(SessionsBase, BaseUser)
 
     @patch("piccolo_api.media.base.uuid")
     def test_image_upload(self, uuid_module: MagicMock):
@@ -608,17 +731,16 @@ class TestMediaStorage(TestCase):
         )
 
 
-class TestTables(TestCase):
+class TestTables(TableTest):
     credentials = {"username": "Bob", "password": "bob123"}
 
+    tables = [SessionsBase, BaseUser, AuthenticatorSecret]
+
     def setUp(self):
-        create_db_tables_sync(SessionsBase, BaseUser, if_not_exists=True)
+        super().setUp()
         BaseUser.create_user_sync(
             **self.credentials, active=True, admin=True, superuser=True
         )
-
-    def tearDown(self):
-        drop_db_tables_sync(SessionsBase, BaseUser)
 
     def test_tables(self):
         """
